@@ -327,14 +327,6 @@ summary(all_teams2)$r.squared
 summary(all_teams3)
 ```
 
-
-
-# Results
-
-
-# Conclusion
-
-
 # References
 
 [baseballr](http://billpetti.github.io/baseballr/) Package from Bill Petti.

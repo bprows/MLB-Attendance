@@ -52,34 +52,3 @@ payrolls$Last_Yr_Payroll <- as.numeric(gsub(",","",payrolls$Last_Yr_Payroll))
 write.csv(payrolls, "Payroll_2019.csv",row.names=F)
 
 
-
-x1 <- 10.12
-x2 <- 18.78
-s1 <- 3.9
-s2 <- 7.4
-s12 <- s1**2
-s22 <- s2**2
-n1 <- 10
-n2 <- 10
-
-(x1-x2) / sqrt((s12/n1) + (s22/n2))
-
-((s12/n1) + (s22/n2))**2 / ((s12/n1)/(n1-1) + (s22/n2)/(n2-1))
-
-(x1-x2) + c(-1,1)*1.96*sqrt(s12/n1 + s22/n2)
-
-
-x1 = 198
-s1 = 20
-n1 = 331
-x2 = 214 
-s2 = 24
-n2 = 331
-
-sp2 <- ((n1-1) * s1**2 + (n2-1)*s2**2) / (n1+n2-2)
-sp <- sqrt(sp2)
-sp
-
-(x1-x2) / (sp * sqrt(1/n1 + 1/n2))
-
-20.93 / (37.74 / sqrt(15))
