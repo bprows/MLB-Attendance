@@ -1,0 +1,139 @@
+---
+title: "Attendance at MLB Games"
+author: "Broderick Prows"
+date: "12/7/2020"
+output: pdf_document
+urlcolor: blue
+---
+
+
+# Abstract
+
+|       This reports outlines models that are used to estimate the affects of a number of features on Attendance at MLB Games. The modeling first aims to find a relationship for a single team, the San Diego Padres, and then generalize that model for all teams in the league. Effort was spent in feature engineering to capture Opponent effect on Attendance and perform variable selection via exhaustive search. The primary evaluation metrics are $R^2$ and BIC. 
+
+
+*Keywords:* OLS Regression, Exhaustive Search, MLB Attendance
+
+```{r, include=F}
+library(dplyr)
+library(xtable)
+library(knitr)
+library(ggplot2)
+library(car)
+games <- read.csv("cleaned_games.csv")
+payrolls <- read.csv("Payroll_2019.csv")
+payroll <- payrolls %>% 
+  select(Team, Last_Yr_Payroll, Team_Payroll, pay_rank)
+payroll$Team_Payroll <- payroll$Team_Payroll / 1000000
+games <- games %>%
+  inner_join(payroll, by=c("Tm"="Team")) %>%
+  inner_join(payroll, 
+             by=c("Opp"="Team"),suffix=c("","_opp"))
+games$InterLeague <- as.integer(games$League != games$League_Opp)
+games$IntraDivision <- as.integer((games$League == games$League_Opp) & (games$Division == games$Division_Opp))
+
+
+attendance_details <- games %>% 
+  group_by(Tm) %>%
+  summarise(Capacity = max(Attendance,na.rm = T),
+            avg_crowd = mean(Attendance,na.rm=T))
+
+attendance_details$Capacity[attendance_details$Tm == "BOS"] <- 37712
+
+games <- games %>%
+  inner_join(attendance_details)
+
+games$Prct_Cap <- games$Attendance / games$Capacity
+games$avg_Prct_Cap <- games$avg_crowd / games$Capacity
+
+opp_details <- games %>% 
+  group_by(Opp) %>%
+  summarise(Opp_Travels = 100*mean(Prct_Cap - avg_Prct_Cap, na.rm=T))
+
+games <- games %>%
+  inner_join(opp_details)
+padres <- games %>%
+  filter(Tm == "SDP")
+
+g1 <- ggplot(data=padres, aes(x=Attendance)) + geom_histogram(bins=20,fill="#94664C",color="black") + 
+  theme(
+  panel.background = element_rect(fill = "#E0C5B6",
+                                colour = "black",
+                                size = 0.5, linetype = "solid"))
+
+# adjust win_prct for the first few series (not enough data)
+padres$Win_Prct_Opp[1:8] <- mean(padres$Win_Prct_Opp[-(1:8)]) 
+padres$Win_Prct[1:8] <- mean(padres$Win_Prct[-(1:8)]) 
+
+padres_basic <- lm(Attendance ~ Rank + weekend + Win_Prct_Opp + Win_Prct + 
+                     Games_Back_Opp + InterLeague + IntraDivision + Team_Payroll_opp, 
+                   data = padres)
+
+pads_ex <- lm(Attendance ~ Rank + cLI + weekend +
+              + InterLeague + IntraDivision + Opp_Travels,
+              data = padres)
+
+all_teams <- lm(Attendance ~ Tm + Rank + weekend + Games_Back + 
+                  Opp_Travels + Win_Prct + Win_Prct_Opp + 
+                  Games_Back_Opp + InterLeague,
+                data = games)
+
+```
+
+# Introduction  
+
+|     MLB depends heavily on having fans in the seats to be profitable. With no fans in attendance for 2020, MLB estimated $4 billion in losses. On a smaller scale, the local economies near the stadiums depend on the crowds to sell food, drinks, apparel, etc. It could be beneficial for these small businesses to model the attendance at games so they can be prepared for big crowds and maximize business. It would also be beneficial for ticket dealers to have an accurate model and be able to price tickets according to factors that effect crowd turnout. It would also be helpful internally for the team to know how many people are projected to be at the game so they can staff the stadium accordingly, or even have a measure to evaluate marketing campaigns to sell more tickets. For these reasons, it makes more sense to design a model that favors simplicity and inference over precise predictions.    
+|     Some of the challenges with this task is that each stadium has a capacity. Some teams sellout games frequently which means there are a lot of games with attendance near capacity, while other teams have large capacity but not many fans in the seats. Some teams have a lot deeper pockets and are a lot more popular, so they attract more fans at away games than others. There needs to be a way to capture these effects.
+
+
+# Motivating Data
+|     The data is courtesy of the [baseballr](http://billpetti.github.io/baseballr/) package. Each game for each team is represented as a row, with details about the attendance, game number of the season, the opponent, the record, date, etc. The data for the away teams was joined to the corresponding data for the home team for each game. [Payroll](http://www.stevetheump.com/Payrolls.htm) data was also included for each team.  
+|     After a little bit of data cleansing there was data that could be modeled. In addition, some feature engineering was performed to capture the Opponent Effect. This is the estimated affect on Attendance when a team comes into town. Teams like the Yankees and Red Sox travel extremely well, games often sell-out when they come to town. Other teams like the Mariners and Marlins get less fans than usual when they travel. Additional features were created for interleague games, since those teams only come into town every couple of years and usually draw a bigger crowd, as well as a feature to indicate if the opponent is a division rival. 
+  
+```{r,echo = F, fig.align="center", message=F, warning=F, fig.cap="Opponent Event on Attendance. The red line is 0 Percent, meaing that the team does not affect attendance at all for away games. Teams with a lot of negative mass like the SEA Mariners do not travel well, while more popular teams like the NYY Yankees travel extremely well and attendance is high when they come to visit. "}
+ggplot(games, aes(x=Prct_Cap - avg_Prct_Cap)) +
+  geom_histogram(fill="#072540") + 
+  geom_vline(xintercept=0,color="#BF2626") + 
+  xlab("% Capacitcy Above Average") + ylab("") +
+  facet_wrap(~Opp)+ 
+  theme(
+  axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.ticks = element_blank())
+```
+  
+
+# Analysis & Results
+|     The first model was designed around the San Diego Padres and trying to understand what features have an affect on attendance. The initial predictors were selected based on domain knowledge. The predictors included were: Division Rank, Weekend, Win%, Win% for Opponent, Games Back, Opponent Games Back, Interleauge, Intradivision, and Opponent Payroll. This resulted in an $R^2 = 0.5486$. Weekend, interleauge, and Opponent payroll were the only significant predictors.  
+|     To try to obtain a better model that captures more of the variance, an exhaustive search for the best features was used. The criteria to select the best model was the one with the smallest BIC. 
+  
+```{r, echo=F}
+summary(pads_ex) %>%
+xtable() %>%
+kable(digits = 3, format.args = list(big.mark = ",", 
+                                     scientific = FALSE))
+```
+
+|     Compared to the previous model, more of the predictors are significant, and the $R^2 = 0.6384$, much better than the previous model. Since this model is just an OLS regression mode, the interpretation and inference is quite simple. Most notably, when an InterLeague opponent comes to town the expected number of fans in attendance will increase by 7,482 on average, holding all else constant. In addition, for every unit of increase for Opp_Travels, or for every percent increase in Average fans in attendance for the traveling team, an additional 719 fans are expected to attend on average. Finally, the weekend games are estimated to have 9483 more fans than non-weekend games, holding all else constant. Weekend games with popular teams and interleague matchups will draw the largest crowds to the stadium.  
+|     The next model was an attempt to generalize a model for all teams. Some research suggests that including a term for the stadium capacity will help account for the bounded response variable, but the challenge here is that some teams have extremely large stadiums (~50k) but fail to get as many as 20k fans on a regular basis, so it might not be able to provide very much predictive power. The better feature to include was actually the home team (both home team and capacity could not be included do to singularity). To identify valuable predictors, an exhaustive search was used, with the additional term of Home Team added after identifying the model with the lowest BIC. Adding Home Team was significant according to the ANOVA test on the full model (with Home team) and reduced model (excluding Home Team). This model actually has an $R^2 = 0.7755$, which is pretty impressive given the volatility of the data. Below is the estimates for the coefficients, excluding the estimates for each team for simplicities sake. 
+
+
+```{r, echo = F}
+summary(all_teams)$coefficients[c(1,31:38),] %>%
+xtable() %>%
+kable(digits = 2, format.args = list(big.mark = ",", 
+                                     scientific = FALSE))
+residualPlot(all_teams)
+```
+
+|     Similar to the model for the Padres, Weekends games are far more popular, with almost 6,000 more fans than average holding all else constant. Interleague games also draw about 2,000 additional fans to the stadium, and the Opponent Travel effect is still significant. However there still seems to be non-normality in the residual plot, whihc is confirmed by the Shapiro-Wilk test with a p-value < 0.05. This can be expected though with almost 2500 games in a regular season, and the model still captures enough of the variance of Attendance to be useful.  
+
+# Conclusion
+|     In conclusion, there does seem to be some pretty obvious trends in MLB Attendance. The model for just the Padres was useful in obtaining an estimate of the variance in Attendance. It could be useful for small business or ticket dealers to use a model like this to prepare for popular or unpopular games. The model was also able to generalize fairly well to all of the teams in the MLB, however this did not really account for the bounds on the response variable. One issue going forward is that these models will not generalize well to life after the pandemic, as some teams will have fans in the stadium before others, and there may be different consumer behaviors in a post-pandemic world. 
+|       Further research would be done into creating some kind of latent variable that captures the number of people that would buy a ticket if they could, and using that to predict the attendance of the games. However, for the purpose at hand of just simply understanding what factors affect game attendance, the simple OLS regression models work just fine. Additional time could use be spent on the feature engineering to identify certain characteristics of the data that have an impact on Attendance that may not already be present. Other methods should be used if more precise predictions are favored rather than interpretability. 
+
+# References
+
+[baseballr](http://billpetti.github.io/baseballr/) Package from Bill Petti.
+
+[Payroll](http://www.stevetheump.com/Payrolls.htm) data from Steve the Ump.

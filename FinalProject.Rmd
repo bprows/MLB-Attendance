@@ -1,0 +1,342 @@
+---
+title: "Baseball Game Attendance"
+author: "Broderick Prows"
+date: "11/30/2020"
+output: pdf_document
+urlcolor: blue
+---
+
+# Abstract
+The purpose of this analysis is to provide insight into what drives attendance at MLB games.
+
+# Introduction
+2020 was an interesting season for Major League Baseball. There was a time during negotiations between players and owners that it seemed like the season was not going to happen. Covid-19 delayed the start of the season, and the players were determined to get paid their full salary, prorated to the number of games that were played (a normal season has 162 games). The owners did not want to agree to that, they claimed that they would lose billions of dollars playing games with no fans in attendance. Eventually they settled on a 60 game season with no fans and full-prorated salaries. 
+
+Being able to understand what effects ticket sales is important because that is where an estimated 40% of revenue comes from for the teams.
+
+
+
+# Analysis
+```{r,message=F,echo=F}
+library(dplyr)
+games <- read.csv("cleaned_games.csv")
+payrolls <- read.csv("Payroll_2019.csv")
+payroll <- payrolls %>% 
+  select(Team, Last_Yr_Payroll, Team_Payroll, pay_rank)
+payroll$Team_Payroll <- payroll$Team_Payroll / 1000000
+games <- games %>%
+  inner_join(payroll, by=c("Tm"="Team")) %>%
+  inner_join(payroll, 
+             by=c("Opp"="Team"),suffix=c("","_opp"))
+games$InterLeague <- as.integer(games$League != games$League_Opp)
+games$IntraDivision <- as.integer((games$League == games$League_Opp) & (games$Division == games$Division_Opp))
+
+
+attendance_details <- games %>% 
+  group_by(Tm) %>%
+  summarise(Capacity = max(Attendance,na.rm = T),
+            avg_crowd = mean(Attendance,na.rm=T))
+
+attendance_details$Capacity[attendance_details$Tm == "BOS"] <- 37712
+
+games <- games %>%
+  inner_join(attendance_details)
+
+games$Prct_Cap <- games$Attendance / games$Capacity
+games$avg_Prct_Cap <- games$avg_crowd / games$Capacity
+```
+
+
+```{r}
+library(ggplot2)
+library(patchwork)
+
+g1 <- ggplot(data=games, aes(x=Attendance)) + geom_histogram(bins=30) + facet_wrap(~Tm)
+
+```
+
+Not all teams are created equal...
+```{r}
+payroll_plt <- rbind(payroll, c("Average", mean(payroll$Last_Yr_Payroll), mean(payroll$Team_Payroll), mean(payroll$pay_rank)))
+payroll_plt$avg_flag <- c(rep(0,30), 1)
+payroll_plt$Team_Payroll <- as.numeric(payroll_plt$Team_Payroll)
+payroll_plt <- arrange(payroll_plt, Team_Payroll)
+ggplot(data=payroll_plt, aes(y=Team_Payroll,x=reorder(Team,Team_Payroll),fill=avg_flag)) + #geom_col() +  
+  geom_bar(stat="identity") + coord_flip() +
+  ggtitle("Payrolls") + ylab("Team Payroll (million)") + xlab("") + theme(legend.position = "none")
+```
+
+
+
+```{r,message=F,warning=F}
+ggplot(games, aes(x=Prct_Cap - avg_Prct_Cap)) +
+  geom_histogram(fill="#072540") + 
+  geom_vline(xintercept=0,color="#BF2626") + 
+  xlab("% Capacitcy Above Average") + ylab("") +
+  facet_wrap(~Opp)+ 
+  theme(
+  axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.ticks = element_blank())
+```
+
+Feature Engineering: How Opponent travel = mean(game capacity - avg capacity (home team)) 
+```{r,message=F}
+opp_details <- games %>% 
+  group_by(Opp) %>%
+  summarise(Opp_Travels = 100*mean(Prct_Cap - avg_Prct_Cap, na.rm=T))
+
+games <- games %>%
+  inner_join(opp_details)
+```
+
+
+
+```{r}
+padres <- games %>%
+  filter(Tm == "SDP")
+```
+
+
+```{r}
+g1 <- ggplot(data=padres, aes(x=Attendance)) + geom_histogram(bins=20,fill="#94664C",color="black") + 
+  theme(
+  panel.background = element_rect(fill = "#E0C5B6",
+                                colour = "black",
+                                size = 0.5, linetype = "solid"))
+g1
+```
+
+
+```{r}
+g2 <- ggplot(data=padres, aes(x=log(Attendance))) + geom_histogram(bins=20,fill="#94664C") + 
+  theme(
+  panel.background = element_rect(fill = "white",
+                                colour = "black",
+                                size = 0.5, linetype = "solid"))
+
+g1+g2
+
+g1
+
+```
+
+
+Vanilla Regression - My best guess as to what drives tickets (given the current data)
+```{r}
+# adjust win_prct for the first few series (not enough data)
+padres$Win_Prct_Opp[1:8] <- mean(padres$Win_Prct_Opp[-(1:8)]) 
+padres$Win_Prct[1:8] <- mean(padres$Win_Prct[-(1:8)]) 
+
+padres_basic <- lm(Attendance ~ Rank + weekend + Win_Prct_Opp + Win_Prct + 
+                     Games_Back_Opp + InterLeague + IntraDivision + Team_Payroll_opp, 
+                   data = padres)
+summary(padres_basic)
+BIC(padres_basic)
+
+library(car)
+residualPlots(padres_basic)
+```
+
+
+```{r,message=F}
+library(corrplot)
+pads_cor <- cor(padres[,c(7,11,14,18,28,29,36,38,39)])
+corrplot(pads_cor,tl.col="black",tl.cex = .75,type="lower")
+```
+
+
+Lasso Regression
+```{r,message=F,echo=T}
+library(glmnet)
+set.seed(2020999)
+X <- model.matrix(Attendance ~ Streak + cLI + weekend + 
+                    Win_Prct + Games_Back + Streak_Opp + cLI_Opp + 
+                    Games_Back_Opp + Team_Payroll_opp + 
+                    InterLeague + IntraDivision + Opp_Travels,
+                  data=padres)[,-1]
+Y <- padres$Attendance
+lasso_pads <- cv.glmnet(X, Y, alpha = 1) # alpha = 1 indicates use l1 penalty.
+plot(lasso_pads)
+beta_lasso <- as.matrix(coef(lasso_pads, s="lambda.min"))[,1]
+options(scipen = 9999)
+knitr::kable(beta_lasso)
+```
+
+
+```{r,message=F,echo=F}
+lasso_pads$glmnet.fit$dev.ratio[which.min(lasso_pads$cvm)]
+```
+
+```{r}
+library(leaps)
+pads_exhaustive <- regsubsets(Attendance ~ Rank + Streak + cLI + weekend + 
+                    Win_Prct + Games_Back + Rank_Opp + Streak_Opp + cLI_Opp + 
+                    Win_Prct_Opp + Games_Back_Opp + Team_Payroll_opp + 
+                    pay_rank_opp + InterLeague + IntraDivision + Team_Payroll_opp + Opp_Travels,
+                  data=padres, method="exhaustive",nvmax=15)
+
+
+which.min(summary(pads_exhaustive)$bic)
+
+summary(pads_exhaustive)$which[7,]
+summary(pads_exhaustive)$bic[7]
+
+pads_ex <- lm(Attendance ~ Rank + cLI + weekend + Win_Prct 
+              + InterLeague + IntraDivision + Opp_Travels,
+              data = padres)
+summary(pads_ex)
+residualPlots(pads_ex)
+```
+
+
+
+Could do random effect (1|Opp) to check if variance > 0, then determine to use some kind of feature based on who they are playing. 
+
+
+```{r}
+fit_summary <- summary(pads_exhaustive)
+fit_summary$bic
+which.min(fit_summary$bic)
+fit_summary$which[8,]
+n <- nrow(padres)
+bic1 <- fit_summary$bic
+bic2 <- n * log(fit_summary$rss) + log(n) * rowSums(fit_summary$which)
+bic1
+bic2 - bic1
+aic <- n * log(fit_summary$rss) + 2 * rowSums(fit_summary$which)
+which.min(aic)
+fit_summary$which[9,]
+gcv <- n * fit_summary$rss / (n - rowSums(fit_summary$which) - 1)**2
+gcv
+which.min(gcv)
+coef(pads_exhaustive, 8)
+```
+
+
+
+Use Random slope / random intercept when you want to generalize model for everyone. 
+```{r}
+library(leaps)
+all_teams <- regsubsets(Attendance ~ Capacity + Rank + Streak + cLI + weekend + 
+                    Win_Prct + Games_Back + Rank_Opp + Streak_Opp + cLI_Opp + 
+                    Win_Prct_Opp + Games_Back_Opp + Team_Payroll_opp + 
+                    pay_rank_opp + InterLeague + IntraDivision + Opp_Travels,
+                  data=games, method="exhaustive",nvmax=15)
+fit_summary <- summary(all_teams)
+which.min(fit_summary$bic)
+n <- nrow(games)
+aic <- n * log(fit_summary$rss) + 2 * rowSums(fit_summary$which)
+which.min(aic)
+fit_summary$which[9,]
+gcv <- n * fit_summary$rss / (n - rowSums(fit_summary$which) - 1)**2
+which.min(gcv)
+fit_summary$which[11,]
+```
+
+```{r}
+all_teams <- lm(Attendance ~ Tm + Capacity + Rank + weekend + Games_Back + 
+                  Opp_Travels + Win_Prct + Win_Prct_Opp + 
+                  Games_Back_Opp + InterLeague,
+                data = games)
+summary(all_teams)
+
+residualPlot(all_teams)
+```
+
+
+
+```{r}
+library(lme4)
+
+rescale <- function(x) {x - mean(x,na.rm=T) / sd(x,na.rm=T)}
+
+games$Capacity_scale <- rescale(games$Capacity)
+games$Attendance_scale <- rescale(games$Attendance)
+
+all_simp <- lmer(Attendance_scale ~ Capacity_scale + Rank + cLI + weekend + Win_Prct 
+              + InterLeague + IntraDivision + Opp_Travels + (Opp_Travels | Tm),
+              data = games)
+fixef(all_simp)
+VarCorr(all_simp)
+as.data.frame(VarCorr(all_simp))
+
+```
+
+
+Predict form MME
+```{r}
+ggplot(games, aes(x=Attendance)) +
+  geom_histogram(fill="#072540") + 
+  #geom_vline(xintercept=0,color="#BF2626") + 
+  xlab("") + ylab("") +
+  facet_wrap(~Tm)+ 
+  theme(
+  axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.ticks = element_blank())
+```
+
+Residuals by teams
+```{r}
+all_out <- cbind(all_teams$model, fitted_vals = all_teams$fitted.values, 
+                 Tm = games$Tm[!is.na(games$Attendance)], resids = all_teams$residuals)
+ggplot(data = all_out, aes(x=fitted_vals, y=resids)) + geom_point(alpha=0.5)
+ggplot(data=all_out, aes(x=Attendance - fitted_vals)) + geom_density()
+ggplot(data=all_out, aes(x=Attendance, y=resids)) + geom_point(alpha=0.5)
+```
+
+
+```{r}
+all2 <- lm(Attendance ~ fitted_vals + Capacity, data=all_out)
+summary(all2)
+plot(all2)
+plot(Attendance ~ fitted_vals, data = all_out)
+abline(all2)
+```
+
+
+```{r}
+games_train <- games[games$Gm < 130, ]
+games_test <- games[games$Gm >= 130, ]
+all_teams2 <- lm(Attendance ~ Rank + weekend + Games_Back + Opp_Travels + Win_Prct +
+                  Rank_Opp + Games_Back_Opp + InterLeague + Tm,
+                data = games_train)
+summary(all_teams2)$r.squared
+preds <- predict(all_teams2, newdata = games_test) - 500
+plot(games_test$Attendance ~ preds)
+abline(coef=c(0,1))
+```
+
+```{r}
+all_teams1 <- lm(Attendance ~ Capacity + Tm + Rank + weekend + Games_Back + Opp_Travels + Win_Prct +
+                  Rank_Opp + Games_Back_Opp + InterLeague,
+                data = games)
+all_teams2 <- lm(Attendance ~ Rank + weekend + Games_Back + Opp_Travels + Win_Prct +
+                  Win_Prct_Opp + Games_Back_Opp + InterLeague,
+                data = games)
+all_teams3 <- lm(Attendance ~ Tm + Rank + weekend + Games_Back + Opp_Travels + Win_Prct +
+                  Rank_Opp + Games_Back_Opp + InterLeague,
+                data = games)
+```
+
+```{r}
+anova(all_teams1, all_teams3)
+summary(all_teams1)$r.squared
+summary(all_teams2)$r.squared
+summary(all_teams3)
+```
+
+
+
+# Results
+
+
+# Conclusion
+
+
+# References
+
+[baseballr](http://billpetti.github.io/baseballr/) Package from Bill Petti.
+
+[Payroll](http://www.stevetheump.com/Payrolls.htm) data from Steve the Ump.
